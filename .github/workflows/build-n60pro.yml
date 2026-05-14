@@ -1,4 +1,4 @@
-name: Netcore N60Pro 高功率24.10(纯净版)
+name: Netcore N60Pro 高功率24.10(最终版)
 on:
   workflow_dispatch:
 
@@ -11,36 +11,39 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 清理磁盘空间
+      - name: 清理空间
         run: |
           sudo rm -rf /usr/local/lib/android /opt/ghc
           docker rmi $(docker images -q) || true
 
-      - name: 安装编译依赖
+      - name: 安装依赖
         run: |
           sudo apt update
           sudo apt install -y build-essential ccache libelf-dev libncurses5-dev libssl-dev python3
 
-      - name: 更新 feeds（仅使用源码自带源）
+      - name: 下载必需插件 (只有这一步,不破坏原生)
+        run: |
+          git clone https://github.com/linkease/istore-ui package/istore-ui
+          git clone https://github.com/destan19/OpenAppFilter package/OpenAppFilter
+          git clone https://github.com/sbwml/openclash package/openclash
+
+      - name: 更新 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 加载高功率配置 + 启用插件
+      - name: 加载配置
         run: |
           cp defconfig/mt7975-ipailna-high-power.config .config
-          
           echo "CONFIG_TARGET_mediatek=y" >> .config
           echo "CONFIG_TARGET_mediatek_mt7981=y" >> .config
           echo "CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y" >> .config
-          
           echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-mosdns=y" >> .config
           echo "CONFIG_PACKAGE_luci-theme-istore=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-istoreui=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-oaf=y" >> .config
-          
           make defconfig
 
       - name: 开始编译
