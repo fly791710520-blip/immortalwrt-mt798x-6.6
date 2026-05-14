@@ -28,27 +28,33 @@ jobs:
           libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
           vim wget xmlto xxd zlib1g-dev
 
-      - name: 添加软件源
+      - name: 写入国内镜像软件源（你提供的全部已加入）
         run: |
-          echo "src-git istoreui https://github.com/linkease/istore-ui" >> feeds.conf.default
-          echo "src-git appfilter https://github.com/destan19/OpenAppFilter.git" >> feeds.conf.default
+          cat > feeds.conf.default << EOF
+          src-git full https://github.com/padavanonly/immortalwrt-mt798x-24.10.git
+          src/gz immortalwrt_core https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/targets/mediatek/filogic/packages
+          src/gz immortalwrt_base https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/base
+          src/gz immortalwrt_luci https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/luci
+          src/gz immortalwrt_packages https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/packages
+          src/gz immortalwrt_routing https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/routing
+          src/gz immortalwrt_telephony https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/telephony
+          src-git istoreui https://github.com/linkease/istore-ui
+          src-git appfilter https://github.com/destan19/OpenAppFilter.git
+          EOF
 
-      - name: 更新 feeds
+      - name: 更新 feeds 并安装
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 加载高功率配置 + 启用插件
+      - name: 加载高功率配置 + 启用所有插件
         run: |
-          # 加载官方高功率模板
           cp defconfig/mt7975-ipailna-high-power.config .config
 
-          # 机型：N60 Pro
           echo "CONFIG_TARGET_mediatek=y" >> .config
           echo "CONFIG_TARGET_mediatek_mt7981=y" >> .config
           echo "CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y" >> .config
 
-          # 插件
           echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-mosdns=y" >> .config
