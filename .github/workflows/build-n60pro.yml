@@ -1,4 +1,4 @@
-name: Netcore N60Pro 高功率24.10(iStore新版首页)
+name: Netcore N60Pro 高功率24.10(纯净版)
 on:
   workflow_dispatch:
 
@@ -13,55 +13,34 @@ jobs:
 
       - name: 清理磁盘空间
         run: |
-          sudo rm -rf /etc/apt/sources.list.d /usr/local/lib/android /opt/ghc
-          sudo apt clean
+          sudo rm -rf /usr/local/lib/android /opt/ghc
           docker rmi $(docker images -q) || true
 
       - name: 安装编译依赖
         run: |
           sudo apt update
-          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-          bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
-          git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
-          libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-          mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools \
-          libpython3-dev qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip \
-          vim wget xmlto xxd zlib1g-dev
+          sudo apt install -y build-essential ccache libelf-dev libncurses5-dev libssl-dev python3
 
-      - name: 写入国内镜像软件源（你提供的全部已加入）
-        run: |
-          cat > feeds.conf.default << EOF
-          src-git full https://github.com/padavanonly/immortalwrt-mt798x-24.10.git
-          src/gz immortalwrt_core https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/targets/mediatek/filogic/packages
-          src/gz immortalwrt_base https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/base
-          src/gz immortalwrt_luci https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/luci
-          src/gz immortalwrt_packages https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/packages
-          src/gz immortalwrt_routing https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/routing
-          src/gz immortalwrt_telephony https://mirrors.vsean.net/openwrt/releases/24.10-SNAPSHOT/packages/aarch64_cortex-a53/telephony
-          src-git istoreui https://github.com/linkease/istore-ui
-          src-git appfilter https://github.com/destan19/OpenAppFilter.git
-          EOF
-
-      - name: 更新 feeds 并安装
+      - name: 更新 feeds（仅使用源码自带源）
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 加载高功率配置 + 启用所有插件
+      - name: 加载高功率配置 + 启用插件
         run: |
           cp defconfig/mt7975-ipailna-high-power.config .config
-
+          
           echo "CONFIG_TARGET_mediatek=y" >> .config
           echo "CONFIG_TARGET_mediatek_mt7981=y" >> .config
           echo "CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y" >> .config
-
+          
           echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-mosdns=y" >> .config
           echo "CONFIG_PACKAGE_luci-theme-istore=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-istoreui=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-oaf=y" >> .config
-
+          
           make defconfig
 
       - name: 开始编译
@@ -70,6 +49,6 @@ jobs:
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
-        with:
+        done:
           name: immortalwrt-n60pro
           path: bin/targets/mediatek/mt7981/
