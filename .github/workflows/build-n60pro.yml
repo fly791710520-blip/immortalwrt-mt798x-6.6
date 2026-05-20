@@ -32,22 +32,51 @@ jobs:
           python3-distutils rsync subversion swig time xsltproc zlib1g-dev \
           quilt libfuse-dev
 
-      # ===== 2. feeds 配置（修正 OpenClash 分支为 master） =====
-      - name: 添加自定义 feeds
+      # ===== 2. feeds 与插件集成（优化版） =====
+      - name: 添加自定义 feeds（仅 iStoreUI 和 AppFilter）
         run: |
-          # 如果仓库没有 feeds.conf，就从默认模板复制
           if [ ! -f feeds.conf ]; then
             cp feeds.conf.default feeds.conf 2>/dev/null || touch feeds.conf
           fi
-          # 追加你需要的三个稳定源（OpenClash 分支已修正为 master）
-          echo "src-git openclash https://github.com/sbwml/luci-app-openclash.git;master" >> feeds.conf
+
+          # 注意：AdGuard Home 使用官方源，无需额外添加 feeds
+
           echo "src-git istoreui https://github.com/linkease/istore-ui.git;main" >> feeds.conf
           echo "src-git appfilter https://github.com/destan19/OpenAppFilter.git;master" >> feeds.conf
 
-      - name: 更新并安装所有 feeds
+      - name: 更新并安装 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+
+      - name: 集成 OpenClash 和 MosDNS
+        run: |
+          # 1. 集成 OpenClash (从 vernesong/OpenClash)
+          mkdir -p package/luci-app-openclash
+          svn export https://github.com/vernesong/OpenClash/trunk/luci-app-openclash package/luci-app-openclash/luci-app-openclash --force
+          
+          # 安装 OpenClash 依赖
+          ./scripts/feeds install dnsmasq-full
+          ./scripts/feeds install bash curl ca-bundle ipset ip-full ruby ruby-yaml unzip
+          ./scripts/feeds install iptables kmod-ipt-nat iptables-mod-tproxy iptables-mod-extra
+          ./scripts/feeds install kmod-tun luci-compat kmod-inet-diag kmod-nft-tproxy
+
+          # 2. 集成 MosDNS (从 sbwml/luci-app-mosdns)
+          # 解决冲突：移除 ImmortalWrt 自带的旧版 mosdns 和 v2ray-geodata
+          rm -rf ./feeds/packages/net/mosdns
+          rm -rf ./feeds/packages/net/v2ray-geodata
+          
+          # 更新 Golang 版本（MosDNS 依赖高版本 Golang）
+          rm -rf feeds/packages/lang/golang
+          git clone https://github.com/sbwml/packages_lang_golang -b 24.x feeds/packages/lang/golang
+          
+          # 克隆 sbwml 维护的 MosDNS 和配套 geodata
+          git clone https://github.com/sbwml/luci-app-mosdns -b v5 package/mosdns
+          git clone https://github.com/sbwml/v2ray-geodata package/v2ray-geodata
+          
+          # 安装 MosDNS 可能需要的依赖
+          ./scripts/feeds install mosdns
+          ./scripts/feeds install v2ray-geodata
 
       # ===== 3. 缓存加速（dl 和 ccache） =====
       - name: 设置 ccache
@@ -81,13 +110,41 @@ jobs:
           CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y
           EOF
 
-          # 启用全部5个插件
+          # 启用全部插件（包含 AdGuard Home）
           cat >> .config <<EOF
+          # AdGuard Home
           CONFIG_PACKAGE_luci-app-adguardhome=y
+          CONFIG_PACKAGE_adguardhome=y
+          CONFIG_PACKAGE_luci-i18n-adguardhome-zh-cn=y
+          # OpenClash
           CONFIG_PACKAGE_luci-app-openclash=y
+          # MosDNS
           CONFIG_PACKAGE_luci-app-mosdns=y
+          # iStore
           CONFIG_PACKAGE_luci-app-istoreui=y
+          # AppFilter
           CONFIG_PACKAGE_luci-app-oaf=y
+          # 强制启用 OpenClash 核心依赖
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_bash=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_ca-bundle=y
+          CONFIG_PACKAGE_ipset=y
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_ruby=y
+          CONFIG_PACKAGE_ruby-yaml=y
+          CONFIG_PACKAGE_unzip=y
+          CONFIG_PACKAGE_iptables=y
+          CONFIG_PACKAGE_kmod-ipt-nat=y
+          CONFIG_PACKAGE_iptables-mod-tproxy=y
+          CONFIG_PACKAGE_iptables-mod-extra=y
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_luci-compat=y
+          CONFIG_PACKAGE_kmod-inet-diag=y
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          # 强制启用 MosDNS 核心依赖
+          CONFIG_PACKAGE_mosdns=y
+          CONFIG_PACKAGE_v2ray-geodata=y
           EOF
 
           # 展开依赖，补全选项
@@ -95,7 +152,7 @@ jobs:
 
           # 验证关键插件是否真的被勾选
           echo "::group::检查插件状态"
-          for pkg in luci-app-adguardhome luci-app-openclash luci-app-mosdns luci-app-istoreui luci-app-oaf; do
+          for pkg in luci-app-adguardhome adguardhome luci-app-openclash luci-app-mosdns luci-app-istoreui luci-app-oaf; do
             if grep -q "CONFIG_PACKAGE_${pkg}=y" .config; then
               echo "✅ $pkg 已启用"
             else
