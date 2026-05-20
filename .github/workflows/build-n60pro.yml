@@ -32,15 +32,15 @@ jobs:
           python3-distutils rsync subversion swig time xsltproc zlib1g-dev \
           quilt libfuse-dev
 
-      # ===== 2. feeds 配置（关键修复） =====
+      # ===== 2. feeds 配置（修正 OpenClash 分支为 master） =====
       - name: 添加自定义 feeds
         run: |
           # 如果仓库没有 feeds.conf，就从默认模板复制
           if [ ! -f feeds.conf ]; then
             cp feeds.conf.default feeds.conf 2>/dev/null || touch feeds.conf
           fi
-          # 追加你需要的三个稳定源
-          echo "src-git openclash https://github.com/sbwml/luci-app-openclash.git;openwrt-24.10" >> feeds.conf
+          # 追加你需要的三个稳定源（OpenClash 分支已修正为 master）
+          echo "src-git openclash https://github.com/sbwml/luci-app-openclash.git;master" >> feeds.conf
           echo "src-git istoreui https://github.com/linkease/istore-ui.git;main" >> feeds.conf
           echo "src-git appfilter https://github.com/destan19/OpenAppFilter.git;master" >> feeds.conf
 
