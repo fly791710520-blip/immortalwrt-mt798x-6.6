@@ -1,69 +1,116 @@
 name: Netcore N60Pro 高功率24.10(全插件版)
+
 on:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+
     steps:
-      - name: 检出源码
+      - name: 检出 ImmortalWrt 源码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      # ===== 1. 磁盘 + 依赖 =====
       - name: 清理磁盘空间
         run: |
-          sudo rm -rf /usr/local/lib/android /opt/ghc
-          docker rmi $(docker images -q) || true
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          docker rmi $(docker images -q) -f || true
           sudo apt clean
+          df -h
 
-      - name: 安装完整编译依赖
+      - name: 安装编译依赖（适配 Ubuntu 22.04）
         run: |
           sudo apt update
           sudo apt install -y build-essential ccache ecj fastjar file g++ gawk \
-          gettext git java-propose-classpath libelf-dev libncurses5-dev \
-          libncursesw5-dev libssl-dev unzip python3 python3-setuptools wget \
-          python3-distutils rsync subversion swig time xsltproc zlib1g-dev
+          gettext git java-propose-classpath libelf-dev libncurses-dev \
+          libssl-dev unzip python3 python3-setuptools wget \
+          python3-distutils rsync subversion swig time xsltproc zlib1g-dev \
+          quilt libfuse-dev
 
-      # 只添加3个必需插件源（不修改原生4个源，无冲突）
-      - name: 添加稳定插件源
+      # ===== 2. feeds 配置（关键修复） =====
+      - name: 添加自定义 feeds
         run: |
-          # OpenClash 官方源（24.10兼容）
-          echo "src-git openclash https://github.com/sbwml/luci-app-openclash.git;openwrt-24.10" >> feeds.conf.default
-          # iStore 新版主页
-          echo "src-git istoreui https://github.com/linkease/istore-ui.git;main" >> feeds.conf.default
-          # AppFilter 应用过滤
-          echo "src-git appfilter https://github.com/destan19/OpenAppFilter.git;master" >> feeds.conf.default
+          # 如果仓库没有 feeds.conf，就从默认模板复制
+          if [ ! -f feeds.conf ]; then
+            cp feeds.conf.default feeds.conf 2>/dev/null || touch feeds.conf
+          fi
+          # 追加你需要的三个稳定源
+          echo "src-git openclash https://github.com/sbwml/luci-app-openclash.git;openwrt-24.10" >> feeds.conf
+          echo "src-git istoreui https://github.com/linkease/istore-ui.git;main" >> feeds.conf
+          echo "src-git appfilter https://github.com/destan19/OpenAppFilter.git;master" >> feeds.conf
 
-      - name: 更新并安装所有 feeds（含插件）
+      - name: 更新并安装所有 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 加载高功率配置+启用全部插件
+      # ===== 3. 缓存加速（dl 和 ccache） =====
+      - name: 设置 ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: n60pro-immortalwrt
+          max-size: 500M
+
+      - name: 缓存下载的源码包
+        uses: actions/cache@v4
+        with:
+          path: dl
+          key: ${{ runner.os }}-dl-${{ hashFiles('feeds.conf', 'feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-dl-
+
+      # ===== 4. 配置固件 =====
+      - name: 加载高功率模板并启用全部插件
         run: |
-          # 加载N60 Pro高功率WiFi模板
+          # 检查高功率配置文件是否存在
+          if [ ! -f defconfig/mt7975-ipailna-high-power.config ]; then
+            echo "::error::找不到 defconfig/mt7975-ipailna-high-power.config"
+            exit 1
+          fi
           cp defconfig/mt7975-ipailna-high-power.config .config
-          
-          # 强制指定机型
-          echo "CONFIG_TARGET_mediatek=y" >> .config
-          echo "CONFIG_TARGET_mediatek_mt7981=y" >> .config
-          echo "CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y" >> .config
-          
-          # 你要的全部5个插件（含依赖）
-          echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-mosdns=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-istoreui=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-oaf=y" >> .config
-          
-          # 自动处理所有依赖
+
+          # 锁定机型
+          cat >> .config <<EOF
+          CONFIG_TARGET_mediatek=y
+          CONFIG_TARGET_mediatek_mt7981=y
+          CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y
+          EOF
+
+          # 启用全部5个插件
+          cat >> .config <<EOF
+          CONFIG_PACKAGE_luci-app-adguardhome=y
+          CONFIG_PACKAGE_luci-app-openclash=y
+          CONFIG_PACKAGE_luci-app-mosdns=y
+          CONFIG_PACKAGE_luci-app-istoreui=y
+          CONFIG_PACKAGE_luci-app-oaf=y
+          EOF
+
+          # 展开依赖，补全选项
           make defconfig
 
-      - name: 开始编译（稳定模式，避免内存不足）
+          # 验证关键插件是否真的被勾选
+          echo "::group::检查插件状态"
+          for pkg in luci-app-adguardhome luci-app-openclash luci-app-mosdns luci-app-istoreui luci-app-oaf; do
+            if grep -q "CONFIG_PACKAGE_${pkg}=y" .config; then
+              echo "✅ $pkg 已启用"
+            else
+              echo "❌ $pkg 未成功启用！"
+              exit 1
+            fi
+          done
+          echo "::endgroup::"
+
+      # ===== 5. 编译 =====
+      - name: 开始编译（稳定2线程）
         run: |
           make -j2 V=s
 
+      # ===== 6. 上传固件 =====
       - name: 上传完整固件
         uses: actions/upload-artifact@v4
         with:
