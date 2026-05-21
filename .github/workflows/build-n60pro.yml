@@ -1,4 +1,4 @@
-name: Netcore N60Pro 高功率24.10(全插件版)
+name: Netcore N60Pro 高功率24.10(调试版)
 
 on:
   workflow_dispatch:
@@ -12,8 +12,6 @@ jobs:
     steps:
       - name: 检出 ImmortalWrt 源码
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: 清理磁盘空间
         run: |
@@ -31,49 +29,17 @@ jobs:
           python3-distutils rsync subversion swig time xsltproc zlib1g-dev \
           quilt libfuse-dev
 
-      # ===== feeds 配置（只添加绝对必需且可用的外部源） =====
-      - name: 配置 feeds
+      - name: 准备 feeds（仅使用官方源）
         run: |
           if [ ! -f feeds.conf ]; then
-            cp feeds.conf.default feeds.conf 2>/dev/null || touch feeds.conf
+            cp feeds.conf.default feeds.conf
           fi
-
-          # 仅添加已验证可用的外部源
-          # iStoreUI - 已验证 main 分支存在
-          echo "src-git istoreui https://github.com/linkease/istore-ui.git;main" >> feeds.conf
-          # OpenAppFilter - 已验证 master 分支存在
-          echo "src-git appfilter https://github.com/destan19/OpenAppFilter.git;master" >> feeds.conf
-
-          # 其他插件（AdGuardHome、OpenClash、MosDNS）优先使用 ImmortalWrt 官方源，不再额外添加外部源
-          # 如果官方源没有，后续配置阶段会自然报错，届时再单独添加
-
-      - name: 更新并安装全部 feeds
-        run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ===== 缓存加速（消除 Node.js 20 弃用警告） =====
-      - name: 设置 ccache
-        uses: hendrikmuhs/ccache-action@v1.2
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        with:
-          key: n60pro-immortalwrt
-          max-size: 500M
-
-      - name: 缓存源码包
-        uses: actions/cache@v5
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-        with:
-          path: dl
-          key: ${{ runner.os }}-dl-${{ hashFiles('feeds.conf', 'feeds.conf.default') }}
-          restore-keys: |
-            ${{ runner.os }}-dl-
-
-      # ===== 配置固件（先尝试启用，如果失败则强制写入） =====
-      - name: 加载高功率模板并启用全部插件
+      - name: 配置固件（仅启用基础插件）
         run: |
+          # 检查高功率配置文件是否存在
           if [ ! -f defconfig/mt7975-ipailna-high-power.config ]; then
             echo "::error::找不到 defconfig/mt7975-ipailna-high-power.config"
             exit 1
@@ -87,50 +53,34 @@ jobs:
           CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y
           EOF
 
-          # 启用全部目标插件及中文
+          # 启用我们的全部5个插件
           cat >> .config <<EOF
           CONFIG_PACKAGE_luci-app-adguardhome=y
           CONFIG_PACKAGE_adguardhome=y
-          CONFIG_PACKAGE_luci-i18n-adguardhome-zh-cn=y
           CONFIG_PACKAGE_luci-app-openclash=y
           CONFIG_PACKAGE_luci-app-mosdns=y
-          CONFIG_PACKAGE_luci-i18n-mosdns-zh-cn=y
           CONFIG_PACKAGE_luci-app-istoreui=y
-          CONFIG_PACKAGE_luci-i18n-quickstart-zh-cn=y
           CONFIG_PACKAGE_luci-app-oaf=y
-          CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y
           EOF
 
-          # 展开依赖（唯一一次）
-          make defconfig
+          # 展开依赖，并将输出保存到文件以供检查
+          make defconfig 2>&1 | tee $GITHUB_WORKSPACE/defconfig_log.txt
 
-          # 强制修复：如果 defconfig 禁用了任何目标插件，直接重新启用
-          for pkg in luci-app-adguardhome luci-app-openclash luci-app-mosdns luci-app-istoreui luci-app-oaf; do
-            if ! grep -q "CONFIG_PACKAGE_${pkg}=y" .config; then
-              echo "⚠️ $pkg 被禁用，强制重新启用"
-              echo "CONFIG_PACKAGE_${pkg}=y" >> .config
-            else
-              echo "✅ $pkg 已启用"
-            fi
-          done
-
-          # 如果使用了 dnsmasq-full（OpenClash 必要），替换冲突
-          if grep -q "CONFIG_PACKAGE_dnsmasq=y" .config; then
-            sed -i 's/CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' .config
-            echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
-          fi
-
-      # ===== 编译（关闭错误即退出，打印详细日志便于排查） =====
-      - name: 编译固件
+      - name: 编译固件（详细日志，忽略缓存）
         run: |
-          make -j2 V=s || {
-            echo "::error::编译失败，请检查上方日志中的具体错误信息"
-            exit 1
-          }
+          # -j2: 稳定2线程编译，避免内存不足
+          # V=s: 输出非常详细的编译日志
+          # 将标准输出和标准错误都重定向到日志文件，同时在控制台显示
+          make -j2 V=s 2>&1 | tee $GITHUB_WORKSPACE/build_log.txt
+        # 注意：如果 make 命令返回非0状态码，GitHub Actions 会自动标记此步骤为失败。
+        # 但我们可以通过 tee 命令确保所有输出都已被记录到 build_log.txt 文件。
 
-      # ===== 上传固件 =====
-      - name: 上传固件
+      - name: 上传编译日志
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-n60pro-full
-          path: bin/targets/mediatek/mt7981/
+          name: build-logs
+          path: |
+            ${{ github.workspace }}/build_log.txt
+            ${{ github.workspace }}/defconfig_log.txt
+            .config
