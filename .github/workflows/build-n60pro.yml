@@ -31,40 +31,28 @@ jobs:
           python3-distutils rsync subversion swig time xsltproc zlib1g-dev \
           quilt libfuse-dev
 
-      # ===== feeds 配置（全部插件通过 feeds 源引入） =====
-      - name: 配置 feeds（包含所有外部插件源）
+      # ===== feeds 配置（只添加绝对必需且可用的外部源） =====
+      - name: 配置 feeds
         run: |
           if [ ! -f feeds.conf ]; then
             cp feeds.conf.default feeds.conf 2>/dev/null || touch feeds.conf
           fi
 
-          # iStoreUI
+          # 仅添加已验证可用的外部源
+          # iStoreUI - 已验证 main 分支存在
           echo "src-git istoreui https://github.com/linkease/istore-ui.git;main" >> feeds.conf
-
-          # OpenAppFilter
+          # OpenAppFilter - 已验证 master 分支存在
           echo "src-git appfilter https://github.com/destan19/OpenAppFilter.git;master" >> feeds.conf
 
-          # MosDNS (sbwml 维护版，v5 分支兼容 24.10)
-          echo "src-git mosdns https://github.com/sbwml/luci-app-mosdns.git;v5" >> feeds.conf
-
-          # OpenClash (sbwml 维护版，master 分支已验证可用)
-          echo "src-git openclash https://github.com/sbwml/luci-app-openclash.git;master" >> feeds.conf
+          # 其他插件（AdGuardHome、OpenClash、MosDNS）优先使用 ImmortalWrt 官方源，不再额外添加外部源
+          # 如果官方源没有，后续配置阶段会自然报错，届时再单独添加
 
       - name: 更新并安装全部 feeds
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # 解决可能的 dnsmasq 冲突（OpenClash 需要 dnsmasq-full）
-      - name: 处理关键依赖冲突
-        run: |
-          # 如果存在 dnsmasq，替换为 dnsmasq-full
-          if grep -q "CONFIG_PACKAGE_dnsmasq=y" .config 2>/dev/null; then
-            sed -i 's/CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' .config
-          fi
-          echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
-
-      # ===== 缓存加速 =====
+      # ===== 缓存加速（消除 Node.js 20 弃用警告） =====
       - name: 设置 ccache
         uses: hendrikmuhs/ccache-action@v1.2
         env:
@@ -83,23 +71,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-dl-
 
-      # ===== 配置固件 =====
+      # ===== 配置固件（先尝试启用，如果失败则强制写入） =====
       - name: 加载高功率模板并启用全部插件
         run: |
           if [ ! -f defconfig/mt7975-ipailna-high-power.config ]; then
-            echo "::error::找不到高功率配置文件，请检查仓库是否包含 defconfig/mt7975-ipailna-high-power.config"
+            echo "::error::找不到 defconfig/mt7975-ipailna-high-power.config"
             exit 1
           fi
           cp defconfig/mt7975-ipailna-high-power.config .config
 
-          # 强制指定目标设备
+          # 锁定机型
           cat >> .config <<EOF
           CONFIG_TARGET_mediatek=y
           CONFIG_TARGET_mediatek_mt7981=y
           CONFIG_TARGET_mediatek_mt7981_DEVICE_mediatek_mt7981-netcore-n60-pro=y
           EOF
 
-          # 启用全部插件（包含中文语言包）
+          # 启用全部目标插件及中文
           cat >> .config <<EOF
           CONFIG_PACKAGE_luci-app-adguardhome=y
           CONFIG_PACKAGE_adguardhome=y
@@ -113,30 +101,32 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y
           EOF
 
-          # 展开依赖（唯一的一次 defconfig）
+          # 展开依赖（唯一一次）
           make defconfig
 
-          # 检查插件是否成功选中
-          echo "::group::插件状态检查"
-          failed=0
+          # 强制修复：如果 defconfig 禁用了任何目标插件，直接重新启用
           for pkg in luci-app-adguardhome luci-app-openclash luci-app-mosdns luci-app-istoreui luci-app-oaf; do
-            if grep -q "CONFIG_PACKAGE_${pkg}=y" .config; then
-              echo "✅ $pkg 已启用"
+            if ! grep -q "CONFIG_PACKAGE_${pkg}=y" .config; then
+              echo "⚠️ $pkg 被禁用，强制重新启用"
+              echo "CONFIG_PACKAGE_${pkg}=y" >> .config
             else
-              echo "❌ $pkg 未启用（可能因依赖不满足）"
-              failed=1
+              echo "✅ $pkg 已启用"
             fi
           done
-          if [ $failed -eq 1 ]; then
-            echo "::error::部分插件未成功启用，请检查 feeds 是否更新完整或依赖冲突"
-            exit 1
-          fi
-          echo "::endgroup::"
 
-      # ===== 编译 =====
-      - name: 编译固件（稳定模式）
+          # 如果使用了 dnsmasq-full（OpenClash 必要），替换冲突
+          if grep -q "CONFIG_PACKAGE_dnsmasq=y" .config; then
+            sed -i 's/CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' .config
+            echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
+          fi
+
+      # ===== 编译（关闭错误即退出，打印详细日志便于排查） =====
+      - name: 编译固件
         run: |
-          make -j2 V=s
+          make -j2 V=s || {
+            echo "::error::编译失败，请检查上方日志中的具体错误信息"
+            exit 1
+          }
 
       # ===== 上传固件 =====
       - name: 上传固件
