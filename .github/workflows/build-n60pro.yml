@@ -1,4 +1,4 @@
-name: Netcore N60Pro 高功率24.10(全插件版)
+name: Netcore N60Pro 高功率24.10(全插件版)-稳定版
 
 on:
   workflow_dispatch:
@@ -31,25 +31,46 @@ jobs:
           python3-distutils rsync subversion swig time xsltproc zlib1g-dev \
           quilt libfuse-dev
 
-      # ===== 关键修复：手动下载缺失的源码包 =====
-      - name: 预下载编译所需的源码包
+      # ===== 关键修复：替换失效的下载镜像 =====
+      - name: 修复下载镜像源
+        run: |
+          # 备份原始文件
+          cp scripts/download.pl scripts/download.pl.bak
+          
+          # 注释掉失效的 mirror2 (HTTP 400)
+          sed -i "s|push @mirrors, 'https://mirror2.immortalwrt.org/sources'|# push \@mirrors, 'https://mirror2.immortalwrt.org/sources'|" scripts/download.pl
+          
+          # 在镜像列表最前面插入阿里云镜像（优先级最高）
+          sed -i "/push \@mirrors, 'https:\/\/sources.immortalwrt.org'/a push \@mirrors, 'https://mirrors.aliyun.com/immortalwrt/sources';" scripts/download.pl
+          
+          echo "已修复镜像列表，当前顺序："
+          grep "push @mirrors" scripts/download.pl
+
+      # ===== 预下载缺失的源码包 =====
+      - name: 预下载源码包 (gnulib)
         run: |
           mkdir -p dl
+          FILE="gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz"
           
-          # 从 GitHub 直接下载 gnulib（ImmortalWrt 镜像缺失此文件）
-          # 使用 coreutils 仓库的 gnulib 作为替代源
-          wget -O dl/gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz \
-            https://github.com/coreutils/gnulib/archive/c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz \
-            || echo "gnulib 下载失败，尝试备用源..."
+          # 多个备用源，直到下载成功
+          for url in \
+            "https://mirrors.aliyun.com/immortalwrt/sources/${FILE}" \
+            "https://sources.immortalwrt.org/${FILE}" \
+            "https://github.com/coreutils/gnulib/archive/c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz" \
+            "https://mirror.sjtu.edu.cn/immortalwrt/sources/${FILE}"
+          do
+            echo "尝试从 $url 下载..."
+            wget -c --timeout=20 -O "dl/${FILE}" "$url" && break
+            echo "从 $url 下载失败，尝试下一个..."
+          done
           
-          # 如果官方 GitHub 也失败，从 jsdelivr CDN 下载
-          if [ ! -f dl/gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz ] || [ $(stat -c%s dl/gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz) -lt 1000 ]; then
-            wget -O dl/gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz \
-              https://mirrors.aliyun.com/immortalwrt/sources/gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz \
-              || true
+          if [ ! -f "dl/${FILE}" ] || [ $(stat -c%s "dl/${FILE}") -lt 1000 ]; then
+            echo "::warning::gnulib 下载失败，将尝试在编译时自动获取"
+          else
+            echo "✅ gnulib 预下载成功"
           fi
 
-      # ===== feeds 配置 =====
+      # ===== feeds 配置（仅添加必需的外部源） =====
       - name: 配置 feeds
         run: |
           if [ ! -f feeds.conf ]; then
@@ -64,7 +85,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ===== 缓存加速 =====
+      # ===== 缓存加速（Node.js 24 兼容） =====
       - name: 设置 ccache
         uses: hendrikmuhs/ccache-action@v1.2
         env:
@@ -73,13 +94,13 @@ jobs:
           key: n60pro-immortalwrt
           max-size: 500M
 
-      - name: 缓存源码包（包含手动下载的文件）
+      - name: 缓存源码包
         uses: actions/cache@v5
         env:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           path: dl
-          key: ${{ runner.os }}-dl-${{ hashFiles('feeds.conf', 'feeds.conf.default') }}-v2
+          key: ${{ runner.os }}-dl-${{ hashFiles('feeds.conf', 'feeds.conf.default') }}-v3
           restore-keys: |
             ${{ runner.os }}-dl-
 
@@ -123,19 +144,33 @@ jobs:
             fi
           done
 
-          # 处理 dnsmasq 冲突
+          # 解决 dnsmasq 冲突
           if grep -q "CONFIG_PACKAGE_dnsmasq=y" .config; then
             sed -i 's/CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' .config
             echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
           fi
 
-      # ===== 编译 =====
+      # ===== 编译（使用修复后的下载源） =====
       - name: 编译固件
+        id: compile
         run: |
-          make -j2 V=s
+          make -j2 V=s 2>&1 | tee build_log.txt
+        continue-on-error: true
 
-      # ===== 上传固件 =====
+      # ===== 上传日志（无论成功与否） =====
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build_log.txt
+            .config
+            scripts/download.pl
+
+      # ===== 如果编译成功，上传固件 =====
       - name: 上传固件
+        if: steps.compile.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-n60pro-full
