@@ -1,4 +1,4 @@
-name: Netcore N60Pro 高功率24.10(全插件版)-稳定版
+name: Netcore N60Pro 高功率24.10(全插件版)-最终稳定版
 
 on:
   workflow_dispatch:
@@ -31,46 +31,51 @@ jobs:
           python3-distutils rsync subversion swig time xsltproc zlib1g-dev \
           quilt libfuse-dev
 
-      # ===== 关键修复：替换失效的下载镜像 =====
-      - name: 修复下载镜像源
+      # ===== 镜像修复：仅保留可靠源 =====
+      - name: 修复下载脚本（仅用阿里云和官方主源）
         run: |
-          # 备份原始文件
+          # 备份
           cp scripts/download.pl scripts/download.pl.bak
-          
-          # 注释掉失效的 mirror2 (HTTP 400)
-          sed -i "s|push @mirrors, 'https://mirror2.immortalwrt.org/sources'|# push \@mirrors, 'https://mirror2.immortalwrt.org/sources'|" scripts/download.pl
-          
-          # 在镜像列表最前面插入阿里云镜像（优先级最高）
-          sed -i "/push \@mirrors, 'https:\/\/sources.immortalwrt.org'/a push \@mirrors, 'https://mirrors.aliyun.com/immortalwrt/sources';" scripts/download.pl
-          
-          echo "已修复镜像列表，当前顺序："
-          grep "push @mirrors" scripts/download.pl
+          # 移除所有已知失效镜像
+          sed -i "/mirror2\.immortalwrt\.org/d" scripts/download.pl
+          sed -i "/mirror\.ox\.ac\.uk/d" scripts/download.pl
+          # 在第一个镜像前插入阿里云镜像（优先级最高）
+          sed -i "0,/push @mirrors, 'https:\/\/sources.immortalwrt.org'/s//push \@mirrors, 'https:\/\/mirrors.aliyun.com\/immortalwrt\/sources';\n&/" scripts/download.pl
+          echo "当前镜像列表："
+          grep 'push @mirrors' scripts/download.pl
 
-      # ===== 预下载缺失的源码包 =====
-      - name: 预下载源码包 (gnulib)
+      # ===== 预下载所有已知易失效的源码包 =====
+      - name: 预下载关键源码包
         run: |
           mkdir -p dl
-          FILE="gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz"
-          
-          # 多个备用源，直到下载成功
-          for url in \
-            "https://mirrors.aliyun.com/immortalwrt/sources/${FILE}" \
-            "https://sources.immortalwrt.org/${FILE}" \
-            "https://github.com/coreutils/gnulib/archive/c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz" \
-            "https://mirror.sjtu.edu.cn/immortalwrt/sources/${FILE}"
-          do
-            echo "尝试从 $url 下载..."
-            wget -c --timeout=20 -O "dl/${FILE}" "$url" && break
-            echo "从 $url 下载失败，尝试下一个..."
-          done
-          
-          if [ ! -f "dl/${FILE}" ] || [ $(stat -c%s "dl/${FILE}") -lt 1000 ]; then
-            echo "::warning::gnulib 下载失败，将尝试在编译时自动获取"
-          else
-            echo "✅ gnulib 预下载成功"
-          fi
+          # 函数：尝试多源下载
+          download_src() {
+            local FILENAME=$1
+            local URLS=$2
+            for url in $URLS; do
+              echo "尝试下载 $FILENAME 从 $url"
+              wget -c --timeout=20 -O "dl/${FILENAME}" "$url" && return 0
+            done
+            return 1
+          }
 
-      # ===== feeds 配置（仅添加必需的外部源） =====
+          # gnulib
+          download_src "gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz" \
+            "https://mirrors.aliyun.com/immortalwrt/sources/gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz \
+             https://sources.immortalwrt.org/gnulib-c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz \
+             https://github.com/coreutils/gnulib/archive/c99c8d491850dc3a6e0b8604a2729d8bc5c0eff1.tar.gz"
+
+          # libressl (3.7.3)
+          download_src "libressl-3.7.3.tar.gz" \
+            "https://mirrors.aliyun.com/immortalwrt/sources/libressl-3.7.3.tar.gz \
+             https://sources.immortalwrt.org/libressl-3.7.3.tar.gz \
+             https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/libressl-3.7.3.tar.gz \
+             https://cdn.openbsd.org/pub/OpenBSD/LibreSSL/libressl-3.7.3.tar.gz"
+
+          # 如果有其他文件，可继续添加...
+          echo "预下载完成"
+
+      # ===== feeds 配置 =====
       - name: 配置 feeds
         run: |
           if [ ! -f feeds.conf ]; then
@@ -85,7 +90,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ===== 缓存加速（Node.js 24 兼容） =====
+      # ===== 缓存加速 =====
       - name: 设置 ccache
         uses: hendrikmuhs/ccache-action@v1.2
         env:
@@ -100,7 +105,7 @@ jobs:
           FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
         with:
           path: dl
-          key: ${{ runner.os }}-dl-${{ hashFiles('feeds.conf', 'feeds.conf.default') }}-v3
+          key: ${{ runner.os }}-dl-${{ hashFiles('feeds.conf', 'feeds.conf.default') }}-v4
           restore-keys: |
             ${{ runner.os }}-dl-
 
@@ -144,20 +149,20 @@ jobs:
             fi
           done
 
-          # 解决 dnsmasq 冲突
+          # dnsmasq 冲突处理
           if grep -q "CONFIG_PACKAGE_dnsmasq=y" .config; then
             sed -i 's/CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' .config
             echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
           fi
 
-      # ===== 编译（使用修复后的下载源） =====
+      # ===== 编译（保留完整日志） =====
       - name: 编译固件
         id: compile
         run: |
           make -j2 V=s 2>&1 | tee build_log.txt
         continue-on-error: true
 
-      # ===== 上传日志（无论成功与否） =====
+      # ===== 上传日志 =====
       - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v4
@@ -166,9 +171,8 @@ jobs:
           path: |
             build_log.txt
             .config
-            scripts/download.pl
 
-      # ===== 如果编译成功，上传固件 =====
+      # ===== 编译成功则上传固件 =====
       - name: 上传固件
         if: steps.compile.outcome == 'success'
         uses: actions/upload-artifact@v4
