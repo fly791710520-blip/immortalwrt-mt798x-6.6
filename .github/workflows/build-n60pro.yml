@@ -91,28 +91,39 @@ jobs:
 
       - name: Enable required plugins (config adjustment)
         run: |
-          # 确保所需插件已内置，若 defconfig 未包含则通过 menuconfig 方式追加
-          # 使用 scripts/diffconfig.sh 可查看当前配置差异，此处直接用 sed 追加
+          # 只写本分支(openwrt-24.10)源里真实存在的包符号；写错的名字会被 make defconfig
+          # 静默丢弃 —— 之前的 luci-app-adguardhome / luci-app-mosdns 就属于这种情况（源里没有）。
+          # 已验证存在：luci-app-openclash(0.47.156) luci-app-mwan3 mwan3
+          #             adguardhome(0.107.57) mosdns(5.3.3) dnsmasq-full
           echo "CONFIG_PACKAGE_luci-app-mwan3=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-adguardhome=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-mosdns=y" >> .config
           echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
-          # 处理可能的依赖缺失：确保核心依赖也被选中
           echo "CONFIG_PACKAGE_luci=y" >> .config
           echo "CONFIG_PACKAGE_luci-base=y" >> .config
-          # 若需要 mwan3 的完整功能，可一并启用其依赖
           echo "CONFIG_PACKAGE_mwan3=y" >> .config
-          # 更新配置，自动解决依赖关系
+          echo "CONFIG_PACKAGE_adguardhome=y" >> .config
+          echo "CONFIG_PACKAGE_mosdns=y" >> .config
+          # OpenClash 依赖 dnsmasq-full：若选中了基础版 dnsmasq，换成 full
+          sed -i 's/^CONFIG_PACKAGE_dnsmasq=y/# CONFIG_PACKAGE_dnsmasq is not set/' .config
+          echo "CONFIG_PACKAGE_dnsmasq-full=y" >> .config
           make defconfig
 
-      - name: Verify target selection (fail fast)
+      - name: Verify target + package selection (fail fast)
         run: |
           echo "--- selected target/subtarget ---"
           grep -E '^CONFIG_TARGET_mediatek(_[a-z0-9]+)?=y' .config || true
           echo "--- selected devices ---"
           grep -E '^CONFIG_TARGET_DEVICE_.*=y' .config || true
-          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_netcore_n60-pro=y' .config \
-            || { echo "::error::netcore_n60-pro is NOT selected in .config"; exit 1; }
+          fail=0
+          for sym in \
+            CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_netcore_n60-pro \
+            CONFIG_PACKAGE_luci-app-openclash \
+            CONFIG_PACKAGE_luci-app-mwan3 \
+            CONFIG_PACKAGE_adguardhome \
+            CONFIG_PACKAGE_mosdns \
+            CONFIG_PACKAGE_dnsmasq-full ; do
+            if grep -q "^${sym}=y" .config; then echo "  OK       ${sym}"; else echo "  MISSING  ${sym}"; fail=1; fi
+          done
+          [ "$fail" = 0 ] || { echo "::error::关键配置未生效，终止编译"; exit 1; }
 
       - name: Download all sources
         run: |
