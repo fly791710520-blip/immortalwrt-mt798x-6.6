@@ -105,6 +105,15 @@ jobs:
           # 更新配置，自动解决依赖关系
           make defconfig
 
+      - name: Verify target selection (fail fast)
+        run: |
+          echo "--- selected target/subtarget ---"
+          grep -E '^CONFIG_TARGET_mediatek(_[a-z0-9]+)?=y' .config || true
+          echo "--- selected devices ---"
+          grep -E '^CONFIG_TARGET_DEVICE_.*=y' .config || true
+          grep -q '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_netcore_n60-pro=y' .config \
+            || { echo "::error::netcore_n60-pro is NOT selected in .config"; exit 1; }
+
       - name: Download all sources
         run: |
           # 预下载所有源码包，利用 dl 缓存加速
@@ -124,7 +133,8 @@ jobs:
           # 创建 artifacts 目录，用于存放待上传的固件文件
           mkdir -p artifacts
           # 查找编译生成的固件文件（sysupgrade 和 factory 镜像）
-          find ${{ env.BIN_DIR }} -name "*.bin" -o -name "*.img" -o -name "*.itb" | \
+          find ${{ env.BIN_DIR }} -name "*.bin" -o -name "*.img" -o -name "*.itb" \
+            -o -name "profiles.json" -o -name "sha256sums" -o -name "*.manifest" | \
             while read file; do
               cp "$file" artifacts/
             done
