@@ -1,4 +1,6 @@
 #include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "iwinfo.h"
 #include "iwinfo_wext.h"
 #include "mtwifi.h"
@@ -527,12 +529,73 @@ static void mtk_cleanup_partial_scan(const char *ifname)
 	mtk_drv_set(ifname, "ScanDwellTime=0:0");
 }
 
+/* 表头列名表：与驱动 get_site_survey 的表头严格对应，缺任何一列都视为表头不可用 */
+static const char * const mtk_survey_cols[SCAN_DATA_MAX] = {
+	[SCAN_DATA_CH]       = "Ch ",
+	[SCAN_DATA_SSID]     = "SSID ",
+	[SCAN_DATA_BSSID]    = "BSSID ",
+	[SCAN_DATA_SECURITY] = "Security ",
+	[SCAN_DATA_RSSI]     = "Rssi",
+	[SCAN_DATA_SIG]      = "Siganl",
+	[SCAN_DATA_EXTCH]    = " ExtCH",
+	[SCAN_DATA_NT]       = "NT",
+	[SCAN_DATA_SSID_LEN] = "SSID_Len",
+	[SCAN_DATA_VHT_CW]   = "VHT_CW",
+	[SCAN_DATA_CCFS0]    = "CCFS0",
+	[SCAN_DATA_CCFS1]    = "CCFS1",
+};
+
+/*
+ * 计算表头各列偏移。
+ * 驱动在 index 越界 / 扫描被打断时只回一行 "Total=N"，**没有表头行**，
+ * 此时调用方拿到的 pos 是 NULL。旧实现直接把 NULL 交给 strstr()：
+ * musl 的 strstr() 首字符走 strchr(h, n[0]) → strchr(NULL, 'C') → 读地址 0
+ * → SIGSEGV(si_code=SEGV_MAPERR, si_addr=0)，这就是 2.4G 扫描必崩的原因。
+ * 这里统一返回 -1，由调用方安全收尾。
+ */
+static int mtk_survey_offsets(const char *hdr, int *offsets)
+{
+	int i;
+
+	if (!hdr)
+		return -1;
+
+	for (i = 0; i < SCAN_DATA_MAX; i++) {
+		const char *hit = strstr(hdr, mtk_survey_cols[i]);
+
+		if (!hit)
+			return -1;
+
+		offsets[i] = hit - hdr;
+	}
+
+	return 0;
+}
+
+/* IWINFO_MTK_DEBUG=1 时把每次 dump 的原始内容追加到 /tmp/iwinfo_mtk_scan.log，便于排障 */
+static void mtk_survey_debug(const char *stage, int index, int total, const char *data)
+{
+	FILE *f;
+	const char *env = getenv("IWINFO_MTK_DEBUG");
+
+	if (!env || !*env || !strcmp(env, "0"))
+		return;
+
+	f = fopen("/tmp/iwinfo_mtk_scan.log", "a");
+	if (!f)
+		return;
+
+	fprintf(f, "=== %s index=%d total=%d\n%s\n", stage, index, total, data ? data : "(null)");
+	fclose(f);
+}
+
 static int mtk_get_scanlist(const char *dev, char *buf, int *len)
 {
-	char *pos;
+	char *pos, *save = NULL;
 	int index = 0;
 	int total = -1;
 	int op_band = 0;
+	int rounds;
 	char *data = NULL;
 	const char *ifname;
 	int offsets[SCAN_DATA_MAX];
@@ -554,52 +617,63 @@ static int mtk_get_scanlist(const char *dev, char *buf, int *len)
 
 	sleep(3);
 
-	while (1) {
+	/* 外层上限：驱动 index 语义不可靠时必须能收尾（旧版会无限 index++ 直到越界） */
+	for (rounds = 0; rounds < 256; rounds++) {
 		memset(data, 0, data_len);
-		if (mtk_get_scanlist_dump(ifname, index, data, data_len)) {
-			free(data);
-			return -1;
-		}
+		if (mtk_get_scanlist_dump(ifname, index, data, data_len))
+			break;
 
+		total = -1;
 		sscanf(data, "\nTotal=%d", &total);
+		mtk_survey_debug("dump", index, total, data);
 
-		strtok(data, "\n");
-		pos = strtok(NULL, "\n");
+		if (total <= 0)
+			break;
 
-		offsets[SCAN_DATA_CH] = strstr(pos, "Ch ") - pos;
-		offsets[SCAN_DATA_SSID] = strstr(pos, "SSID ") - pos;
-		offsets[SCAN_DATA_BSSID] = strstr(pos, "BSSID ") - pos;
-		offsets[SCAN_DATA_SECURITY] = strstr(pos, "Security ") - pos;
-		offsets[SCAN_DATA_RSSI] = strstr(pos, "Rssi") - pos;
-		offsets[SCAN_DATA_SIG] = strstr(pos, "Siganl") - pos;
-		offsets[SCAN_DATA_EXTCH] = strstr(pos, " ExtCH") - pos;
-		offsets[SCAN_DATA_NT] = strstr(pos, "NT") - pos;
-		offsets[SCAN_DATA_SSID_LEN] = strstr(pos, "SSID_Len") - pos;
-		offsets[SCAN_DATA_VHT_CW] = strstr(pos, "VHT_CW") - pos;
-		offsets[SCAN_DATA_CCFS0]  = strstr(pos, "CCFS0") - pos;
-		offsets[SCAN_DATA_CCFS1]  = strstr(pos, "CCFS1") - pos;
+		save = NULL;
+		if (!strtok_r(data, "\n", &save))
+			break;
+
+		pos = strtok_r(NULL, "\n", &save);
+		if (mtk_survey_offsets(pos, offsets)) {
+			mtk_survey_debug("no-header", index, total, "-> abort (no usable header)");
+			break;
+		}
 
 		while (1) {
 			struct iwinfo_crypto_entry *crypto = &e->crypto;
 			const char *security;
 			uint8_t *mac = e->mac;
-			int ssid_len;
+			int ssid_len = 0;
+			int row_len;
 
-			pos = strtok(NULL, "\n");
+			pos = strtok_r(NULL, "\n", &save);
 			if (!pos)
 				break;
 
-			sscanf(pos, "%d", &index);
+			if (sscanf(pos, "%d", &index) != 1)
+				break;
+
+			row_len = strlen(pos);
+
+			/* 行的字段宽度可能比表头窄，越界的列一律不用 */
+			if (offsets[SCAN_DATA_NT] + 2 > row_len)
+				break;
 
 			if (strncmp(pos + offsets[SCAN_DATA_NT], "In", 2))
+				continue;
+
+			if (offsets[SCAN_DATA_SECURITY] >= row_len)
 				continue;
 
 			security = pos + offsets[SCAN_DATA_SECURITY];
 			if (!strstr(security, "PSK") && !strstr(security, "OPEN") && !strstr(security, "OWE"))
 				continue;
 
-			if (*len + (int)sizeof(struct iwinfo_scanlist_entry) > IWINFO_BUFSIZE)
-				break;
+			if (*len + (int)sizeof(struct iwinfo_scanlist_entry) > IWINFO_BUFSIZE) {
+				free(data);
+				return 0;
+			}
 
 			memset(crypto, 0, sizeof(struct iwinfo_crypto_entry));
 
@@ -649,65 +723,91 @@ static int mtk_get_scanlist(const char *dev, char *buf, int *len)
 
 			e->mode = IWINFO_OPMODE_MASTER;
 
-			sscanf(pos + offsets[SCAN_DATA_CH], "%"SCNu8, &e->channel);
+			e->channel = 0;
+			if (offsets[SCAN_DATA_CH] < row_len)
+				sscanf(pos + offsets[SCAN_DATA_CH], "%"SCNu8, &e->channel);
+
 			if (op_band)
 				e->band = op_band;
 			else if (e->channel <= 14)
 				e->band = IWINFO_BAND_24;
 			else
 				e->band = IWINFO_BAND_5;
+
 			memset(&e->ht_chan_info, 0, sizeof(e->ht_chan_info));
 			memset(&e->vht_chan_info, 0, sizeof(e->vht_chan_info));
-			if (strstr(pos + offsets[SCAN_DATA_EXTCH], "ABOVE")) {
-				e->ht_chan_info.primary_chan = e->channel;
-				e->ht_chan_info.secondary_chan_off = 1; /* above */
-				e->ht_chan_info.chan_width = 1;        /* ht_chan_width[1]=2040 */
-			} else if (strstr(pos + offsets[SCAN_DATA_EXTCH], "BELOW")) {
-				e->ht_chan_info.primary_chan = e->channel;
-				e->ht_chan_info.secondary_chan_off = 3; /* below */
-				e->ht_chan_info.chan_width = 1;        /* ht_chan_width[1]=2040 */
+
+			if (offsets[SCAN_DATA_EXTCH] < row_len) {
+				if (strstr(pos + offsets[SCAN_DATA_EXTCH], "ABOVE")) {
+					e->ht_chan_info.primary_chan = e->channel;
+					e->ht_chan_info.secondary_chan_off = 1; /* above */
+					e->ht_chan_info.chan_width = 1;        /* ht_chan_width[1]=2040 */
+				} else if (strstr(pos + offsets[SCAN_DATA_EXTCH], "BELOW")) {
+					e->ht_chan_info.primary_chan = e->channel;
+					e->ht_chan_info.secondary_chan_off = 3; /* below */
+					e->ht_chan_info.chan_width = 1;        /* ht_chan_width[1]=2040 */
+				}
 			}
+
 			/* chan_width: raw IEEE 0/1/2/3 -> 40/80/160/80+80; clamp invalid to 0 */
 			{
 				unsigned int vht_cw = 0, ccfs0 = 0, ccfs1 = 0;
-				sscanf(pos + offsets[SCAN_DATA_VHT_CW], "%u", &vht_cw);
-				sscanf(pos + offsets[SCAN_DATA_CCFS0],  "%u", &ccfs0);
-				sscanf(pos + offsets[SCAN_DATA_CCFS1],  "%u", &ccfs1);
+
+				if (offsets[SCAN_DATA_VHT_CW] < row_len)
+					sscanf(pos + offsets[SCAN_DATA_VHT_CW], "%u", &vht_cw);
+				if (offsets[SCAN_DATA_CCFS0] < row_len)
+					sscanf(pos + offsets[SCAN_DATA_CCFS0], "%u", &ccfs0);
+				if (offsets[SCAN_DATA_CCFS1] < row_len)
+					sscanf(pos + offsets[SCAN_DATA_CCFS1], "%u", &ccfs1);
+
 				if (vht_cw > 3)
 					vht_cw = 0;
+
 				e->vht_chan_info.chan_width    = (uint8_t)vht_cw;
 				e->vht_chan_info.center_chan_1 = (uint8_t)ccfs0;
 				e->vht_chan_info.center_chan_2 = (uint8_t)ccfs1;
 			}
-			sscanf(pos + offsets[SCAN_DATA_RSSI], "%"SCNu8, &e->signal);
-			sscanf(pos + offsets[SCAN_DATA_SIG], "%"SCNu8, &e->quality);
+
+			if (offsets[SCAN_DATA_RSSI] < row_len)
+				sscanf(pos + offsets[SCAN_DATA_RSSI], "%"SCNu8, &e->signal);
+			if (offsets[SCAN_DATA_SIG] < row_len)
+				sscanf(pos + offsets[SCAN_DATA_SIG], "%"SCNu8, &e->quality);
 			e->quality_max = 100;
 
-			sscanf(pos + offsets[SCAN_DATA_BSSID], "%02"SCNx8":%02"SCNx8":%02"SCNx8":%02"SCNx8":%02"SCNx8":%02"SCNx8"",
-				mac + 0, mac + 1, mac + 2, mac + 3, mac + 4, mac + 5);
+			if (offsets[SCAN_DATA_BSSID] + 17 <= row_len)
+				sscanf(pos + offsets[SCAN_DATA_BSSID], "%02"SCNx8":%02"SCNx8":%02"SCNx8":%02"SCNx8":%02"SCNx8":%02"SCNx8"",
+					mac + 0, mac + 1, mac + 2, mac + 3, mac + 4, mac + 5);
 
-			sscanf(pos + offsets[SCAN_DATA_SSID_LEN], "%d", &ssid_len);
+			if (offsets[SCAN_DATA_SSID_LEN] < row_len)
+				sscanf(pos + offsets[SCAN_DATA_SSID_LEN], "%d", &ssid_len);
 			if (ssid_len < 0)
 				ssid_len = 0;
 			if (ssid_len > IWINFO_ESSID_MAX_SIZE)
 				ssid_len = IWINFO_ESSID_MAX_SIZE;
-			memcpy(e->ssid, pos + offsets[SCAN_DATA_SSID], ssid_len);
+
+			if (offsets[SCAN_DATA_SSID] < row_len) {
+				int avail = row_len - offsets[SCAN_DATA_SSID];
+
+				if (ssid_len > avail)
+					ssid_len = avail;
+				memcpy(e->ssid, pos + offsets[SCAN_DATA_SSID], ssid_len);
+			} else {
+				ssid_len = 0;
+			}
+
 			e->ssid[ssid_len] = '\0';
 
 			*len += sizeof(struct iwinfo_scanlist_entry);
 			e++;
 
-			if (index + 1 == total)
+			if (index + 1 >= total)
 				break;
 		}
 
-		if (*len + (int)sizeof(struct iwinfo_scanlist_entry) > IWINFO_BUFSIZE)
+		if (index + 1 >= total)
 			break;
 
-		if (index + 1 == total)
-			break;
-		else
-			index++;
+		index++;
 	}
 
 	free(data);
