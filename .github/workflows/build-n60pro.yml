@@ -152,6 +152,10 @@ jobs:
           # 同时复制编译日志和构建信息，便于排查问题
           cp .config artifacts/config.log || true
           cp .config.old artifacts/config.old.log || true
+          # 额外收集 iwinfo 相关 ipk：便于不刷机、单独替换路由器上的 libiwinfo/iwinfo 来验证修复
+          find bin/packages -name "libiwinfo*.ipk" -o -name "iwinfo_*.ipk" | while read f; do
+            cp "$f" artifacts/ || true
+          done
           find ${{ env.BIN_DIR }} -name "*.txt" -exec cp {} artifacts/ \; || true
           # 生成文件清单
           ls -la artifacts/ > artifacts/filelist.txt
